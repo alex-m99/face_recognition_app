@@ -6,6 +6,8 @@ import threading
 import time
 import requests
 import math
+import requests 
+
 
 # de rezolvat: 
 # - (Rezolvat-ish) nu merge timerul
@@ -26,6 +28,31 @@ cached_encodings = []
 #             ready_to_request = True
 #         else:
 #             time.sleep(1)
+
+
+def notify_backend(status, name = None):
+
+        data = {
+            'status': status,
+        }
+        if name:
+            data['name'] = name
+        try:
+            requests.post("http://localhost:8000/notify", json=data)
+        except Exception as e:
+            print("Failed to notify backend: ", e)
+
+def notify_lock(unlock: bool):
+    """
+    Sends a GET request to the lock controller.
+    unlock=True: unlocks the door
+    unlock=False: locks the door
+    """
+    url = "http://192.168.1.141/5/on" if unlock else "http://192.168.1.141/5/off"
+    try:
+        requests.get(url, timeout=2)
+    except Exception as e:
+        print("Failed to notify lock: ", e)
 
 # Function to update cached face encodings from an API
 def update_cached_encodings():
@@ -115,12 +142,16 @@ def start_face_recognition():
                     best_match_index = np.argmin(face_distances)
                     name = cached_names[best_match_index]
                     confidence = face_confidence(face_distances[best_match_index])
+                    notify_backend("success", name)
+                    notify_lock(unlock=True)
                 elif ready_to_enter_else.is_set():
                     # name = 'Unknown'
                     # confidence = 'Unknown'
                     #ready_to_request = True
                     ready_to_request.set()
                     ready_to_enter_else.clear()
+                    notify_backend("fail")
+                    notify_lock(unlock=False)
                    
 
                 face_names.append(f'{name} ({confidence})')
