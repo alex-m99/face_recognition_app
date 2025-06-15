@@ -7,7 +7,11 @@ import time
 import requests
 import math
 import requests 
+import getpass
+import websocket
+import json
 
+SYSTEM_NAME = "Sistem 1"
 
 # de rezolvat: 
 # - (Rezolvat-ish) nu merge timerul
@@ -29,6 +33,45 @@ cached_encodings = []
 #         else:
 #             time.sleep(1)
 
+def login_and_start():
+    print(f"Welcome to system {SYSTEM_NAME}")
+    while True:
+        password = getpass.getpass("Enter password: ")
+        try:
+            response = requests.post(
+                "http://localhost:8000/recognition-login",
+                json={"name": SYSTEM_NAME, "password": password}
+            )
+            if response.status_code == 200 and response.json().get("success"):
+                system_id = response.json().get("system_id")
+                print("Login successful.")
+                start_face_recognition(system_id)
+                break
+            else:
+                print("Incorrect password. Please try again.")
+        except Exception as e:
+            print("Error connecting to backend:", e)
+            time.sleep(2)
+
+def listen_for_updates(system_id):
+
+    def on_open(ws):
+        ws.send(json.dumps({"system_id": system_id}))
+
+    def on_message(ws, message):
+        data = json.loads(message)
+        if data.get("event") == "update_encodings":
+            print("Received update signal, refreshing encodings...")
+            cached_names.clear()
+            cached_encodings.clear()
+            ready_to_request.set()
+
+    ws = websocket.WebSocketApp(
+        "ws://localhost:8000/ws/updates",
+        on_open=on_open,
+        on_message=on_message
+    )
+    ws.run_forever()
 
 def notify_backend(status, name = None):
 
@@ -55,32 +98,33 @@ def notify_lock(unlock: bool):
         print("Failed to notify lock: ", e)
 
 # Function to update cached face encodings from an API
-def update_cached_encodings():
-    global cached_encodings, ready_to_request
+def update_cached_encodings(system_id):
+    global cached_encodings, cached_names, ready_to_request
     while True:
         if ready_to_request.is_set():
             try:
                 print("Making API request to update cached encodings...")
-                response = requests.get("http://localhost:8000/people/encodings")
+                response = requests.get(f"http://localhost:8000/{system_id}/encodings")
                 if response.status_code == 200:
-                    # Adjust this parsing to match your actual API format
-                    #print(response.json())
                     json_response = response.json()
-                    #cached_encodings = [np.array(item['encoding']) for item in json_response]
+                    cached_names.clear()
+                    cached_encodings.clear()
                     for item in json_response:
                         # print(item)
                         cached_names.append(item['firstName'])
-                        cached_encodings.append(item['encoding'])
-                    #print(cached_encodings)
+                        # If you store encoding as a string in the DB, convert it to a list/array here
+                        # For example, if it's a JSON string: encoding = json.loads(item['encoding'])
+                        # If it's already a list: encoding = item['encoding']
+                        encoding = item.get('encoding')
+                        if encoding is not None:
+                            cached_encodings.append(encoding)
                     print("Cached encodings updated.")
                 else:
                     print("Failed to fetch encodings:", response.status_code)
             except Exception as e:
                 print("Error updating encodings:", e)
             finally:
-                #ready_to_request = False
                 ready_to_request.clear()
-                #print("Ready to request in thread", ready_to_request)
                 time.sleep(20)
                 ready_to_enter_else.set()
 
@@ -98,7 +142,9 @@ def face_confidence(face_distance, face_match_threshold=0.6):
         return str(round(value, 2)) + '%'
 
 
-def start_face_recognition():
+def start_face_recognition(system_id):
+     # Start the websocket listener in a background thread
+    threading.Thread(target=listen_for_updates, args=(system_id,), daemon=True).start()
 
     process_current_frame = True
     face_locations = []
@@ -111,7 +157,7 @@ def start_face_recognition():
     if not video_capture.isOpened():
         sys.exit('Video source not found...')
 
-    threading.Thread(target=update_cached_encodings, daemon=True).start()
+    threading.Thread(target=update_cached_encodings, args=(system_id,), daemon=True).start()
     ready_to_enter_else.set()
 
     while True:
@@ -178,4 +224,4 @@ def start_face_recognition():
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    start_face_recognition()
+    login_and_start()
