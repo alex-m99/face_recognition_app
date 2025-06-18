@@ -21,6 +21,7 @@ SYSTEM_NAME = "Sistem 1"
 #ready_to_request = True
 ready_to_request = threading.Event()
 ready_to_enter_else = threading.Event()
+system_stopped_event = threading.Event()
 cached_names = []
 cached_encodings = []
 
@@ -46,15 +47,14 @@ def login_and_start():
                 system_id = response.json().get("system_id")
                 print("Login successful.")
                 start_face_recognition(system_id)
-                break
+                return
             else:
                 print("Incorrect password. Please try again.")
         except Exception as e:
             print("Error connecting to backend:", e)
             time.sleep(2)
 
-def listen_for_updates(system_id):
-
+def listen_for_updates(system_id, state_event, logout_event, start_event, stop_event):
     def on_open(ws):
         ws.send(json.dumps({"system_id": system_id}))
 
@@ -65,13 +65,42 @@ def listen_for_updates(system_id):
             cached_names.clear()
             cached_encodings.clear()
             ready_to_request.set()
+        elif data.get("event") == "system_stopped":
+            print("System stopped signal received. Entering sleep mode.")
+            state_event.set()
+        elif data.get("event") == "system_started":
+            print("System started signal received. Waking up.")
+            start_event.set()
+        elif data.get("event") == "system_logout":
+            print("Logout signal received. Returning to login.")
+            logout_event.set()
 
     ws = websocket.WebSocketApp(
         "ws://localhost:8000/ws/updates",
         on_open=on_open,
         on_message=on_message
     )
-    ws.run_forever()
+
+    # Run the websocket in a loop that checks stop_event
+    wst = threading.Thread(target=ws.run_forever)
+    wst.daemon = True
+    wst.start()
+    while not stop_event.is_set():
+        time.sleep(0.1)
+    ws.close()
+
+def sleeping_state(state_event, start_event, logout_event, system_id):
+    dot_count = 0
+    while True:
+        if logout_event.is_set():
+            logout_event.clear()
+            return "logout"
+        if start_event.is_set():
+            start_event.clear()
+            return "start"
+        print("System is closed" + "." * (dot_count + 1))
+        dot_count = (dot_count + 1) % 5
+        time.sleep(5)
 
 def notify_backend(status, name = None):
 
@@ -85,13 +114,13 @@ def notify_backend(status, name = None):
         except Exception as e:
             print("Failed to notify backend: ", e)
 
-def notify_lock(unlock: bool):
+def notify_lock(unlock: bool, token: str):
     """
     Sends a GET request to the lock controller.
     unlock=True: unlocks the door
     unlock=False: locks the door
     """
-    url = "http://192.168.1.141/5/on" if unlock else "http://192.168.1.141/5/off"
+    url = f"http://192.168.1.141/5/on?token={token}" if unlock else f"http://192.168.1.141/5/on?token={token}"
     try:
         requests.get(url, timeout=2)
     except Exception as e:
@@ -143,8 +172,19 @@ def face_confidence(face_distance, face_match_threshold=0.6):
 
 
 def start_face_recognition(system_id):
-     # Start the websocket listener in a background thread
-    threading.Thread(target=listen_for_updates, args=(system_id,), daemon=True).start()
+    # Events for controlling state
+    state_event = threading.Event()   # Sleep mode
+    logout_event = threading.Event()  # Logout to login
+    start_event = threading.Event()   # Wake up from sleep
+    stop_event = threading.Event()
+
+    listener_thread = threading.Thread(
+        target=listen_for_updates,
+        args=(system_id, state_event, logout_event, start_event, stop_event),
+        daemon=True
+    )
+    listener_thread.start()
+
 
     process_current_frame = True
     face_locations = []
@@ -160,11 +200,36 @@ def start_face_recognition(system_id):
     threading.Thread(target=update_cached_encodings, args=(system_id,), daemon=True).start()
     ready_to_enter_else.set()
 
-    while True:
-        #print(ready_to_request.is_set())
-        ret, frame = video_capture.read()
-       # print("Ready to request in main: ", ready_to_request)
+    consecutive_frames_required = 5
+    recognized_counter = 0
+    unknown_counter = 0
+    last_recognized_name = None
+    authenticated = False
+    unknown_notified = False
 
+    while True:
+        if logout_event.is_set():
+            print("Logging out and returning to login...")
+            break
+        if state_event.is_set():
+            print("Stopping face recognition and entering sleep mode...")
+            video_capture.release()
+            cv2.destroyAllWindows()
+            # Sleep until system_started or logout
+            result = sleeping_state(state_event, start_event, logout_event, system_id)
+            if result == "logout":
+                break
+            # Re-initialize video capture after waking up
+            video_capture = cv2.VideoCapture(0)
+            if not video_capture.isOpened():
+                sys.exit('Video source not found...')
+            ready_to_enter_else.set()
+            state_event.clear()
+            continue
+
+        ret, frame = video_capture.read()
+        if not ret:
+            continue
 
         if process_current_frame:
             name = 'Unknown'
@@ -172,39 +237,50 @@ def start_face_recognition(system_id):
             small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
             rgb_small_frame = np.ascontiguousarray(small_frame[:, :, ::-1])
 
-            #Find all faces in the current frame
             face_locations = face_recognition.face_locations(rgb_small_frame)
             face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
 
             face_names = []
             for face_encoding in face_encodings:
-                #print("Cached encodings in main: ", cached_encodings)
                 matches = face_recognition.compare_faces(cached_encodings, face_encoding)
-                # matches = [False, True, True, False]
-                
-                # if the encoding is in the cache memory
                 if any(matches):
                     face_distances = face_recognition.face_distance(cached_encodings, face_encoding)
                     best_match_index = np.argmin(face_distances)
                     name = cached_names[best_match_index]
                     confidence = face_confidence(face_distances[best_match_index])
-                    notify_backend("success", name)
-                    notify_lock(unlock=True)
-                elif ready_to_enter_else.is_set():
-                    # name = 'Unknown'
-                    # confidence = 'Unknown'
-                    #ready_to_request = True
-                    ready_to_request.set()
-                    ready_to_enter_else.clear()
-                    notify_backend("fail")
-                    notify_lock(unlock=False)
-                   
+
+                    if name == last_recognized_name:
+                        recognized_counter += 1
+                    else:
+                        recognized_counter = 1
+                        last_recognized_name = name
+
+                    if recognized_counter >= consecutive_frames_required and not authenticated:
+                        notify_backend("success", name)
+                        notify_lock(unlock=True)
+                        authenticated = True
+                        unknown_counter = 0
+                        unknown_notified = False
+                else:
+                    recognized_counter = 0
+                    last_recognized_name = None
+                    authenticated = False
+                    if ready_to_enter_else.is_set():
+                        unknown_counter += 1
+                        if unknown_counter >= consecutive_frames_required and not unknown_notified:
+                            ready_to_request.set()
+                            ready_to_enter_else.clear()
+                            notify_backend("fail")
+                            notify_lock(unlock=False)
+                            unknown_notified = True
+                    else:
+                        unknown_counter = 0
+                        unknown_notified = False
 
                 face_names.append(f'{name} ({confidence})')
 
         process_current_frame = not process_current_frame
 
-        # Display annotations
         for (top, right, bottom, left), name in zip(face_locations, face_names):
             top *= 4
             right *= 4
@@ -219,9 +295,13 @@ def start_face_recognition(system_id):
 
         if cv2.waitKey(1) == ord('q'):
             break
-
+    
+    stop_event.set()
+    time.sleep(0.2)
     video_capture.release()
     cv2.destroyAllWindows()
+    system_stopped_event.clear()
+    login_and_start()
 
 if __name__ == '__main__':
     login_and_start()
