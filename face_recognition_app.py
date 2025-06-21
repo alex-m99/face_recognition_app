@@ -45,8 +45,10 @@ def login_and_start():
             )
             if response.status_code == 200 and response.json().get("success"):
                 system_id = response.json().get("system_id")
+                system_token = response.json().get("system_token")
+                lock_password = response.json().get("lock_password")
                 print("Login successful.")
-                start_face_recognition(system_id)
+                start_face_recognition(system_id, system_token, lock_password)
                 return
             else:
                 print("Incorrect password. Please try again.")
@@ -102,27 +104,30 @@ def sleeping_state(state_event, start_event, logout_event, system_id):
         dot_count = (dot_count + 1) % 5
         time.sleep(5)
 
-def notify_backend(status, name = None):
+def notify_backend(status, system_id, name=None, system_token=None):
+    data = {'status': status}
+    if name:
+        data['name'] = name
+    headers = {}
+    if system_token:
+        headers['Authorization'] = f'Bearer {system_token}'
+    try:
+        requests.post(f"http://localhost:8000/notify/{system_id}", json=data, headers=headers)
+    except Exception as e:
+        print("Failed to notify backend: ", e)
 
-        data = {
-            'status': status,
-        }
-        if name:
-            data['name'] = name
-        try:
-            requests.post("http://localhost:8000/notify", json=data)
-        except Exception as e:
-            print("Failed to notify backend: ", e)
-
-def notify_lock(unlock: bool, token: str):
+def notify_lock(unlock: bool, lock_password: str):
     """
     Sends a GET request to the lock controller.
     unlock=True: unlocks the door
     unlock=False: locks the door
+    The lock_password is sent in the Authorization header.
     """
-    url = f"http://192.168.1.141/5/on?token={token}" if unlock else f"http://192.168.1.141/5/on?token={token}"
+    action = "off" if unlock else "on"
+    url = f"http://192.168.1.135/5/{action}"
+    headers = {"Authorization": lock_password}
     try:
-        requests.get(url, timeout=2)
+        requests.get(url, headers=headers, timeout=2)
     except Exception as e:
         print("Failed to notify lock: ", e)
 
@@ -171,7 +176,7 @@ def face_confidence(face_distance, face_match_threshold=0.6):
         return str(round(value, 2)) + '%'
 
 
-def start_face_recognition(system_id):
+def start_face_recognition(system_id, system_token, lock_password):
     # Events for controlling state
     state_event = threading.Event()   # Sleep mode
     logout_event = threading.Event()  # Logout to login
@@ -256,8 +261,8 @@ def start_face_recognition(system_id):
                         last_recognized_name = name
 
                     if recognized_counter >= consecutive_frames_required and not authenticated:
-                        notify_backend("success", name)
-                        notify_lock(unlock=True)
+                        notify_backend("success", system_id, name, system_token=system_token)
+                        notify_lock(unlock=True, lock_password=lock_password)
                         authenticated = True
                         unknown_counter = 0
                         unknown_notified = False
@@ -270,8 +275,8 @@ def start_face_recognition(system_id):
                         if unknown_counter >= consecutive_frames_required and not unknown_notified:
                             ready_to_request.set()
                             ready_to_enter_else.clear()
-                            notify_backend("fail")
-                            notify_lock(unlock=False)
+                            notify_backend("fail", system_id, system_token=system_token)
+                            notify_lock(unlock=False, lock_password=lock_password)
                             unknown_notified = True
                     else:
                         unknown_counter = 0
