@@ -90,6 +90,9 @@ def listen_for_updates(system_id, state_event, logout_event, start_event, stop_e
     while not stop_event.is_set():
         time.sleep(0.1)
     ws.close()
+    # while not stop_event.is_set():
+    #     ws.run_forever()
+    # ws.close()
 
 def sleeping_state(state_event, start_event, logout_event, system_id):
     dot_count = 0
