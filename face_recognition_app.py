@@ -211,6 +211,9 @@ def start_face_recognition(system_id, system_token, lock_password):
     last_recognized_name = None
     authenticated = False
     unknown_notified = False
+    reset_frames_required = 10  # Number of frames with no face to reset authorization
+    not_detected_counter = 0
+
 
     while True:
         if logout_event.is_set():
@@ -244,6 +247,16 @@ def start_face_recognition(system_id, system_token, lock_password):
 
             face_locations = face_recognition.face_locations(rgb_small_frame)
             face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+
+             # --- Reset logic: if no face detected, increment counter ---
+            if len(face_encodings) == 0:
+                not_detected_counter += 1
+                if not_detected_counter >= reset_frames_required:
+                    authenticated = False
+                    last_recognized_name = None
+                    recognized_counter = 0
+            else:
+                not_detected_counter = 0  # Reset counter if any face is detected
 
             face_names = []
             for face_encoding in face_encodings:
